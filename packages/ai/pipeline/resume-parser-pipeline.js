@@ -27,7 +27,7 @@ export function createResumeParserPipeline(options = {}) {
 }
 
 export function parseResumeText(text, extraction, prompt = resumeParsingPrompt) {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = normalizeResumeTextForParsing(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const groups = [];
   let current = null;
 
@@ -69,6 +69,16 @@ export function parseResumeText(text, extraction, prompt = resumeParsingPrompt) 
       source: "pdf_text_extraction"
     }
   };
+}
+
+export function normalizeResumeTextForParsing(text) {
+  return String(text ?? "")
+    .replace(/\0/g, "")
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, " ")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 function groupToSection(group, extraction) {

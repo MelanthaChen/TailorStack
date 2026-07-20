@@ -2,10 +2,16 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import zlib from "node:zlib";
 import test from "node:test";
 import { callApi, callMultipartApi, createTestApi, getSetCookie } from "./helpers/api-test-helpers.js";
 
-const pdf = Buffer.from("%PDF-1.4\n(Experience)\n(- Built APIs with Node.js)\n(Projects)\n(- Created a resume parser)\n");
+const pdf = createCompressedTextPdf([
+  "Experience",
+  "- Built APIs with Node.js",
+  "Projects",
+  "- Created a resume parser"
+]);
 
 test("upload to parse integration persists sections, entities, and bullets", async () => {
   const rootPath = await mkdtemp(join(tmpdir(), "tailorstack-parser-integration-"));
@@ -46,8 +52,41 @@ test("upload to parse integration persists sections, entities, and bullets", asy
     });
     assert.equal(preview.statusCode, 200);
     assert.equal(preview.body.data.sections.length, 2);
+    assert.equal(preview.body.data.sections[0].sectionType, "experience");
+    assert.notEqual(preview.body.data.sections[0].confidence, 0.55);
     assert.equal(preview.body.data.sections[0].entities[0].bullets[0].confidence > 0, true);
+    assert.equal(preview.body.data.sections[0].entities[0].bullets[0].text, "Built APIs with Node.js");
   } finally {
     await rm(rootPath, { recursive: true, force: true });
   }
 });
+
+function createCompressedTextPdf(lines) {
+  const content = [
+    "BT",
+    "/F1 12 Tf",
+    "72 720 Td",
+    ...lines.flatMap((line, index) => [
+      index === 0 ? "" : "0 -16 Td",
+      `(${escapePdfString(line)}) Tj`
+    ]),
+    "ET"
+  ].filter(Boolean).join("\n");
+  const compressed = zlib.deflateSync(Buffer.from(content, "latin1"));
+  return Buffer.from([
+    "%PDF-1.4",
+    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+    "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
+    "3 0 obj << /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj",
+    `4 0 obj << /Length ${compressed.length} /Filter /FlateDecode >> stream`,
+    compressed.toString("latin1"),
+    "endstream endobj",
+    "5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
+    "trailer << /Root 1 0 R >>",
+    "%%EOF"
+  ].join("\n"), "latin1");
+}
+
+function escapePdfString(value) {
+  return value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
+}

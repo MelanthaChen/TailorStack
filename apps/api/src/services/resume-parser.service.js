@@ -1,3 +1,4 @@
+import { normalizeResumeTextForParsing } from "../../../../packages/ai/pipeline/resume-parser-pipeline.js";
 import { validateParserOutput } from "./parser-output-validator.js";
 
 export class ResumeParserService {
@@ -52,8 +53,39 @@ export class ResumeParserService {
       }
 
       const fileBuffer = await this.objectStorage.getObject(uploadedFile.objectStorageKey);
+      this.logger.info("resume_parse_trace", {
+        requestId,
+        jobId: job.id,
+        stage: "uploaded_file",
+        uploadedFileSize: uploadedFile.byteSize,
+        mimeType: uploadedFile.contentType,
+        preview: previewText(fileBuffer.toString("latin1", 0, 200))
+      });
       const extraction = this.pdfExtractionService.extract(fileBuffer);
-      const parserOutput = validateParserOutput(await this.aiResumeParserService.parse({ extraction, resume, uploadedFile }));
+      this.logger.info("resume_parse_trace", {
+        requestId,
+        jobId: job.id,
+        stage: "pdf_extraction",
+        preview: previewText(extraction.text)
+      });
+      const normalizedText = normalizeResumeTextForParsing(extraction.text);
+      this.logger.info("resume_parse_trace", {
+        requestId,
+        jobId: job.id,
+        stage: "parser_normalization",
+        preview: previewText(normalizedText)
+      });
+      const parserOutput = validateParserOutput(await this.aiResumeParserService.parse({
+        extraction: { ...extraction, text: normalizedText },
+        resume,
+        uploadedFile
+      }));
+      this.logger.info("resume_parse_trace", {
+        requestId,
+        jobId: job.id,
+        stage: "database_write",
+        preview: previewText(databaseWritePreview(parserOutput))
+      });
       const parsedSections = await this.resumeParserRepository.replaceParsedDraft({
         userId: job.userId,
         resumeId,
@@ -121,4 +153,22 @@ export class ResumeParserService {
     const sections = await this.resumeParserRepository.getParsedDraft(user.id, resumeId);
     return { resume, parseJob, sections };
   }
+}
+
+function previewText(value) {
+  return String(value ?? "").replace(/\0/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
+function databaseWritePreview(parserOutput) {
+  return (parserOutput.sections ?? [])
+    .flatMap((section) => [
+      section.title,
+      ...(section.entities ?? []).flatMap((entity) => [
+        entity.title,
+        entity.organization,
+        ...(entity.bullets ?? []).map((bullet) => bullet.text)
+      ])
+    ])
+    .filter(Boolean)
+    .join("\n");
 }
