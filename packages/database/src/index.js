@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import net from "node:net";
 import tls from "node:tls";
 
@@ -155,41 +156,48 @@ export class PostgresClient {
 
   async query(text, params = [], { timeoutMs = 5000 } = {}) {
     clearTimeout(this.idleTimer);
-    if (params.length) {
-      this.socket.write(Buffer.concat([
-        message("P", Buffer.concat([cstring(""), cstring(text), int16(0)])),
-        message("B", bindBody(params)),
-        message("D", Buffer.concat([Buffer.from("P"), cstring("")])),
-        message("E", Buffer.concat([cstring(""), int32(0)])),
-        message("S", Buffer.alloc(0))
-      ]));
-    } else {
-      this.socket.write(message("Q", Buffer.from(`${text}\0`, "utf8")));
-    }
-    const rows = [];
-    let fields = [];
-    return withTimeout(new Promise((resolve, reject) => {
-      const poll = () => {
-        try {
-          for (;;) {
-            const packet = this.readPacket();
-            if (!packet) break;
-            const type = String.fromCharCode(packet.type);
-            if (type === "T") fields = parseRowDescription(packet.body);
-            else if (type === "D") rows.push(parseDataRow(packet.body, fields));
-            else if (type === "E") reject(parseError(packet.body));
-            else if (type === "Z") {
-              resolve({ rows, rowCount: rows.length, fields });
-              return;
+    const metadata = queryMetadata(text, params);
+    try {
+      if (params.length) {
+        this.socket.write(Buffer.concat([
+          message("P", Buffer.concat([cstring(""), cstring(text), int16(0)])),
+          message("B", bindBody(params)),
+          message("D", Buffer.concat([Buffer.from("P"), cstring("")])),
+          message("E", Buffer.concat([cstring(""), int32(0)])),
+          message("S", Buffer.alloc(0))
+        ]));
+      } else {
+        this.socket.write(message("Q", Buffer.from(`${text}\0`, "utf8")));
+      }
+      const rows = [];
+      let fields = [];
+      return await withTimeout(new Promise((resolve, reject) => {
+        const poll = async () => {
+          try {
+            for (;;) {
+              const packet = this.readPacket();
+              if (!packet) break;
+              const type = String.fromCharCode(packet.type);
+              if (type === "T") fields = parseRowDescription(packet.body);
+              else if (type === "D") rows.push(parseDataRow(packet.body, fields));
+              else if (type === "E") {
+                reject(attachQueryMetadata(parseError(packet.body), metadata));
+                return;
+              } else if (type === "Z") {
+                resolve({ rows, rowCount: rows.length, fields });
+                return;
+              }
             }
+            setImmediate(poll);
+          } catch (error) {
+            reject(attachQueryMetadata(error, metadata));
           }
-          setImmediate(poll);
-        } catch (error) {
-          reject(error);
-        }
-      };
-      poll();
-    }), timeoutMs, "Database query timed out");
+        };
+        poll();
+      }), timeoutMs, "Database query timed out");
+    } catch (error) {
+      throw attachQueryMetadata(error, metadata);
+    }
   }
 
   async startup() {
@@ -205,7 +213,7 @@ export class PostgresClient {
     ]);
     this.socket.write(Buffer.concat([int32(payload.length + 4), payload]));
     await new Promise((resolve, reject) => {
-      const poll = () => {
+      const poll = async () => {
         try {
           for (;;) {
             const packet = this.readPacket();
@@ -215,6 +223,7 @@ export class PostgresClient {
               const authType = packet.body.readInt32BE(0);
               if (authType === 0) continue;
               if (authType === 3) this.socket.write(message("p", Buffer.from(`${this.config.password}\0`, "utf8")));
+              else if (authType === 10) await this.authenticateScram(packet.body.subarray(4));
               else reject(new Error(`Unsupported PostgreSQL authentication method ${authType}`));
             } else if (type === "K") {
               this.backendKey = packet.body;
@@ -234,6 +243,42 @@ export class PostgresClient {
     });
   }
 
+  async authenticateScram(body) {
+    const mechanisms = body.toString("utf8").split("\0").filter(Boolean);
+    if (!mechanisms.includes("SCRAM-SHA-256")) throw new Error(`Unsupported PostgreSQL SASL mechanisms: ${mechanisms.join(", ")}`);
+    const nonce = crypto.randomBytes(18).toString("base64");
+    const clientFirstBare = `n=${saslName(this.config.user)},r=${nonce}`;
+    const clientFirstMessage = `n,,${clientFirstBare}`;
+    this.socket.write(message("p", Buffer.concat([
+      cstring("SCRAM-SHA-256"),
+      int32(Buffer.byteLength(clientFirstMessage)),
+      Buffer.from(clientFirstMessage, "utf8")
+    ])));
+    const serverFirst = await this.readExpectedPacket("R");
+    const serverFirstType = serverFirst.body.readInt32BE(0);
+    if (serverFirstType !== 11) throw new Error(`Unexpected SASL continuation type ${serverFirstType}`);
+    const serverFirstMessage = serverFirst.body.subarray(4).toString("utf8");
+    const attrs = parseScramAttributes(serverFirstMessage);
+    if (!attrs.r?.startsWith(nonce)) throw new Error("Invalid SCRAM server nonce");
+    const salt = Buffer.from(attrs.s, "base64");
+    const iterations = Number(attrs.i);
+    const clientFinalWithoutProof = `c=${Buffer.from("n,,").toString("base64")},r=${attrs.r}`;
+    const saltedPassword = crypto.pbkdf2Sync(this.config.password, salt, iterations, 32, "sha256");
+    const clientKey = crypto.createHmac("sha256", saltedPassword).update("Client Key").digest();
+    const storedKey = crypto.createHash("sha256").update(clientKey).digest();
+    const authMessage = `${clientFirstBare},${serverFirstMessage},${clientFinalWithoutProof}`;
+    const clientSignature = crypto.createHmac("sha256", storedKey).update(authMessage).digest();
+    const proof = xorBuffers(clientKey, clientSignature).toString("base64");
+    const serverKey = crypto.createHmac("sha256", saltedPassword).update("Server Key").digest();
+    const expectedServerSignature = crypto.createHmac("sha256", serverKey).update(authMessage).digest("base64");
+    this.socket.write(message("p", Buffer.from(`${clientFinalWithoutProof},p=${proof}`, "utf8")));
+    const serverFinal = await this.readExpectedPacket("R");
+    const serverFinalType = serverFinal.body.readInt32BE(0);
+    if (serverFinalType !== 12) throw new Error(`Unexpected SASL final type ${serverFinalType}`);
+    const serverFinalAttrs = parseScramAttributes(serverFinal.body.subarray(4).toString("utf8"));
+    if (serverFinalAttrs.v !== expectedServerSignature) throw new Error("Invalid SCRAM server signature");
+  }
+
   async close() {
     if (!this.socket) return;
     this.socket.write(message("X", Buffer.alloc(0)));
@@ -250,6 +295,27 @@ export class PostgresClient {
     const body = this.buffer.subarray(5, length + 1);
     this.buffer = this.buffer.subarray(length + 1);
     return { type, body };
+  }
+
+  readExpectedPacket(expectedType) {
+    return new Promise((resolve, reject) => {
+      const poll = () => {
+        try {
+          const packet = this.readPacket();
+          if (!packet) {
+            setImmediate(poll);
+            return;
+          }
+          const type = String.fromCharCode(packet.type);
+          if (type === "E") reject(parseError(packet.body));
+          else if (type !== expectedType) reject(new Error(`Unexpected PostgreSQL packet ${type}`));
+          else resolve(packet);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      poll();
+    });
   }
 }
 
@@ -299,7 +365,7 @@ function bindBody(params) {
     if (value === null || value === undefined) {
       values.push(int32(-1));
     } else {
-      const encoded = Buffer.from(typeof value === "object" ? JSON.stringify(value) : String(value), "utf8");
+      const encoded = Buffer.from(encodeTextParameter(value), "utf8");
       values.push(int32(encoded.length), encoded);
     }
   }
@@ -311,6 +377,49 @@ function bindBody(params) {
     ...values,
     int16(0)
   ]);
+}
+
+export function encodeTextParameter(value) {
+  if (Buffer.isBuffer(value)) return `\\x${value.toString("hex")}`;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") return JSON.stringify(sanitizeSqlValue(value));
+  return sanitizeSqlString(String(value));
+}
+
+export function queryMetadata(text, params = []) {
+  return {
+    sqlText: text,
+    parameterCount: params.length,
+    parameterTypes: params.map((value) => describeParameter(value))
+  };
+}
+
+export function describeParameter(value) {
+  if (value === null) return { type: "null" };
+  if (value === undefined) return { type: "undefined" };
+  if (Buffer.isBuffer(value)) return { type: "buffer", byteLength: value.byteLength };
+  if (value instanceof Date) return { type: "date" };
+  if (Array.isArray(value)) return { type: "array", length: value.length };
+  return { type: typeof value };
+}
+
+function attachQueryMetadata(error, metadata) {
+  if (!error.sqlText) error.sqlText = metadata.sqlText;
+  if (error.parameterCount === undefined) error.parameterCount = metadata.parameterCount;
+  if (!error.parameterTypes) error.parameterTypes = metadata.parameterTypes;
+  return error;
+}
+
+function parseScramAttributes(messageText) {
+  return Object.fromEntries(messageText.split(",").map((part) => [part[0], part.slice(2)]));
+}
+
+function saslName(value) {
+  return value.replaceAll("=", "=3D").replaceAll(",", "=2C");
+}
+
+function xorBuffers(left, right) {
+  return Buffer.from(left.map((value, index) => value ^ right[index]));
 }
 
 function parseRowDescription(body) {
@@ -373,8 +482,23 @@ function parseError(body) {
 
 export function sqlLiteral(value) {
   if (value === null || value === undefined) return "NULL";
-  if (typeof value === "object") return `'${JSON.stringify(value).replaceAll("'", "''")}'`;
-  return `'${String(value).replaceAll("'", "''")}'`;
+  if (typeof value === "object") return `'${JSON.stringify(sanitizeSqlValue(value)).replaceAll("'", "''")}'`;
+  return `'${sanitizeSqlString(String(value)).replaceAll("'", "''")}'`;
+}
+
+export function sanitizeSqlValue(value) {
+  if (typeof value === "string") return sanitizeSqlString(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeSqlValue(item));
+  if (value && typeof value === "object") {
+    if (Buffer.isBuffer(value)) return value;
+    if (value instanceof Date) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeSqlValue(item)]));
+  }
+  return value;
+}
+
+function sanitizeSqlString(value) {
+  return value.replaceAll("\0", "");
 }
 
 function withTimeout(promise, timeoutMs, messageText) {

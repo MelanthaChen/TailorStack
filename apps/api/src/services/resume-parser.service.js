@@ -83,7 +83,10 @@ export class ResumeParserService {
         requestId,
         jobId: job.id,
         userId: job.userId,
-        error: error.message
+        error: error.message,
+        sqlText: error.sqlText,
+        parameterCount: error.parameterCount,
+        parameterTypes: error.parameterTypes
       });
       throw error;
     }

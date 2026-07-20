@@ -116,3 +116,69 @@ test("ResumeParserService marks job failed when parser output is invalid", async
     await rm(rootPath, { recursive: true, force: true });
   }
 });
+
+test("ResumeParserService logs SQL diagnostics when parser persistence fails", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "tailorstack-parser-sql-fail-"));
+  const uploadedFiles = new InMemoryUploadedFileRepository();
+  const resumes = new InMemoryResumeRepository();
+  const asyncJobs = new InMemoryAsyncJobRepository();
+  const storage = new FileSystemObjectStorage({ rootPath, bucket: "bucket" });
+  const errorLogs = [];
+
+  try {
+    await storage.putObject("resume.pdf", Buffer.from("%PDF-1.4\n(Experience)\n(- Built APIs)\n"));
+    const uploadedFile = await uploadedFiles.createUploadedFile({
+      userId: "user_1",
+      fileType: "resume_pdf",
+      originalFilename: "resume.pdf",
+      contentType: "application/pdf",
+      byteSize: 10,
+      objectStorageKey: "resume.pdf",
+      checksumSha256: "abc"
+    });
+    const resume = await resumes.createResume({
+      userId: "user_1",
+      title: "Master Resume",
+      sourceFileId: uploadedFile.id
+    });
+    const job = await asyncJobs.createJob({
+      userId: "user_1",
+      jobType: "resume_parse",
+      payloadRef: { resumeId: resume.id, uploadedFileId: uploadedFile.id }
+    });
+    const postgresError = new Error("invalid message format");
+    postgresError.code = "08P01";
+    postgresError.sqlText = "INSERT INTO resume_bullets (...) VALUES (...)";
+    postgresError.parameterCount = 0;
+    postgresError.parameterTypes = [];
+
+    const service = new ResumeParserService({
+      asyncJobRepository: asyncJobs,
+      resumeRepository: resumes,
+      uploadedFileRepository: uploadedFiles,
+      resumeParserRepository: {
+        async replaceParsedDraft() {
+          throw postgresError;
+        }
+      },
+      objectStorage: storage,
+      pdfExtractionService: new PdfExtractionService(),
+      aiResumeParserService: new AiResumeParserService(),
+      logger: {
+        info() {},
+        error(event, fields) {
+          errorLogs.push({ event, fields });
+        }
+      }
+    });
+
+    await assert.rejects(() => service.executeParseJob(job.id, { requestId: "req_sql" }), /invalid message format/);
+
+    assert.equal(errorLogs[0].event, "resume_parse_job_failed");
+    assert.equal(errorLogs[0].fields.sqlText, postgresError.sqlText);
+    assert.equal(errorLogs[0].fields.parameterCount, 0);
+    assert.deepEqual(errorLogs[0].fields.parameterTypes, []);
+  } finally {
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});

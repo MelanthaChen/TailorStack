@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { validateConfig } from "../packages/config/src/index.js";
+import { loadEnvFile, resetEnvLoaderForTests, validateConfig } from "../packages/config/src/index.js";
 import { GenericJobFramework, InMemoryQueue } from "../packages/queue/src/index.js";
 import { callApi, createTestApi } from "./helpers/api-test-helpers.js";
 
@@ -43,6 +46,34 @@ test("configuration validation rejects weak production secrets", () => {
     sessionSecret: "change-me-in-local-development",
     objectStorageSecretAccessKey: "tailorstack-dev"
   }), /SESSION_SECRET/);
+});
+
+test("configuration loads .env without overriding existing process environment", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tailorstack-env-"));
+  const envPath = join(dir, ".env");
+  const original = process.env.DATABASE_URL;
+  try {
+    delete process.env.DATABASE_URL;
+    resetEnvLoaderForTests();
+    await writeFile(envPath, "DATABASE_URL=postgres://file-user:file-pass@127.0.0.1:15432/file-db\n");
+    loadEnvFile(pathToFileURL(envPath));
+    assert.equal(process.env.DATABASE_URL, "postgres://file-user:file-pass@127.0.0.1:15432/file-db");
+
+    process.env.DATABASE_URL = "postgres://shell-user:shell-pass@127.0.0.1:15432/shell-db";
+    resetEnvLoaderForTests();
+    loadEnvFile(pathToFileURL(envPath));
+    assert.equal(process.env.DATABASE_URL, "postgres://shell-user:shell-pass@127.0.0.1:15432/shell-db");
+  } finally {
+    resetEnvLoaderForTests();
+    if (original === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = original;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository .env points development database at docker host port", async () => {
+  const env = await readFile(".env", "utf8");
+  assert.match(env, /DATABASE_URL=postgres:\/\/tailorstack:tailorstack@127\.0\.0\.1:15432\/tailorstack/);
 });
 
 test("generic job framework standardizes lifecycle fields", async () => {

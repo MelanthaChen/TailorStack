@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from "node:fs";
+
 const production = "production";
+let envLoaded = false;
 
 function readString(name, fallback, { required = false } = {}) {
   const raw = process.env[name];
@@ -17,6 +20,7 @@ function readInt(name, fallback, options = {}) {
 }
 
 export function loadConfig() {
+  loadEnvFile();
   const nodeEnv = readString("NODE_ENV", "development");
   const appEnv = readString("APP_ENV", "local");
   const config = {
@@ -37,7 +41,7 @@ export function loadConfig() {
     maxUploadBytes: readInt("MAX_UPLOAD_BYTES", 5 * 1024 * 1024, { min: 1 }),
     rateLimitWindowMs: readInt("RATE_LIMIT_WINDOW_MS", 60_000, { min: 1000 }),
     rateLimitMaxRequests: readInt("RATE_LIMIT_MAX_REQUESTS", 120, { min: 1 }),
-    databaseUrl: readString("DATABASE_URL", "postgres://tailorstack:tailorstack@127.0.0.1:5432/tailorstack"),
+    databaseUrl: readString("DATABASE_URL", "postgres://tailorstack:tailorstack@127.0.0.1:15432/tailorstack"),
     databasePoolMax: readInt("DATABASE_POOL_MAX", 10, { min: 1 }),
     databaseIdleTimeoutMs: readInt("DATABASE_IDLE_TIMEOUT_MS", 30_000, { min: 1000 }),
     databaseConnectionTimeoutMs: readInt("DATABASE_CONNECTION_TIMEOUT_MS", 5000, { min: 100 }),
@@ -59,11 +63,38 @@ export function loadConfig() {
 export function validateConfig(config) {
   if (!["debug", "info", "warn", "error"].includes(config.logLevel)) throw new Error("LOG_LEVEL is invalid");
   if (!["memory", "postgres"].includes(config.authRepositoryDriver)) throw new Error("AUTH_REPOSITORY_DRIVER is invalid");
-  if (!["filesystem"].includes(config.objectStorageDriver)) throw new Error("OBJECT_STORAGE_DRIVER is invalid");
+  if (!["filesystem", "minio"].includes(config.objectStorageDriver)) throw new Error("OBJECT_STORAGE_DRIVER is invalid");
   validateUrl("WEB_ORIGIN", config.webOrigin);
   if (config.authRepositoryDriver === "postgres") validateUrl("DATABASE_URL", config.databaseUrl);
   if (config.appEnv === production || config.nodeEnv === production) validateProductionSecrets(config);
   return config;
+}
+
+export function loadEnvFile(envUrl = new URL("../../../.env", import.meta.url)) {
+  if (envLoaded) return;
+  envLoaded = true;
+  if (!existsSync(envUrl)) return;
+  const content = readFileSync(envUrl, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    if (process.env[key] !== undefined) continue;
+    process.env[key] = unquoteEnvValue(rawValue.trim());
+  }
+}
+
+export function resetEnvLoaderForTests() {
+  envLoaded = false;
+}
+
+function unquoteEnvValue(value) {
+  if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 function validateProductionSecrets(config) {

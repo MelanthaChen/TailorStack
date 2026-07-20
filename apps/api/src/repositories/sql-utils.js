@@ -8,9 +8,17 @@ export function sql(value) {
 
 export async function queryJson(databaseUrl, query, options = {}) {
   const pool = poolForUrl(databaseUrl, options.config);
-  const wrapped = `SELECT COALESCE(json_agg(result.value), '[]'::json) AS value FROM (${query}) result`;
+  const wrapped = wrapJsonRowsQuery(query);
   const result = await pool.query(wrapped, [], { timeoutMs: options.timeoutMs });
   return result.rows[0]?.value ?? [];
+}
+
+export function wrapJsonRowsQuery(query) {
+  const normalized = query.trim().replace(/;+\s*$/, "");
+  if (isDirectDataMutation(normalized)) {
+    return `WITH result AS (${normalized}) SELECT COALESCE(json_agg(result.value), '[]'::json) AS value FROM result`;
+  }
+  return `SELECT COALESCE(json_agg(result.value), '[]'::json) AS value FROM (${normalized}) result`;
 }
 
 export async function executeSql(databaseUrl, statement, options = {}) {
@@ -33,4 +41,8 @@ function poolForUrl(databaseUrl, config = {}) {
     poolByUrl.set(databaseUrl, getDatabasePool({ ...config, databaseUrl }));
   }
   return poolByUrl.get(databaseUrl);
+}
+
+function isDirectDataMutation(query) {
+  return /^(INSERT|UPDATE|DELETE)\b/i.test(query);
 }
