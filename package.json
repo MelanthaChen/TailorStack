@@ -1,0 +1,24 @@
+{
+  "name": "tailorstack",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TailorStack monorepo foundation.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "workers/*"
+  ],
+  "scripts": {
+    "check": "node scripts/ci/check-workspace.mjs",
+    "test": "node --test",
+    "dev:api": "node apps/api/src/server.js",
+    "dev:web": "node apps/web/src/dev-server.js",
+    "dev:infra": "docker compose -f infra/docker/docker-compose.yml up",
+    "migrate": "node scripts/dev/migrate.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  }
+}

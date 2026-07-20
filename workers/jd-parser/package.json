@@ -1,0 +1,6 @@
+{
+  "name": "@tailorstack/worker-jd-parser",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module"
+}
