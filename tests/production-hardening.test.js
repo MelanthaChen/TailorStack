@@ -71,8 +71,8 @@ test("configuration loads .env without overriding existing process environment",
   }
 });
 
-test("repository .env points development database at docker host port", async () => {
-  const env = await readFile(".env", "utf8");
+test(".env.example points development database at docker host port", async () => {
+  const env = await readFile(".env.example", "utf8");
   assert.match(env, /DATABASE_URL=postgres:\/\/tailorstack:tailorstack@127\.0\.0\.1:15432\/tailorstack/);
 });
 
