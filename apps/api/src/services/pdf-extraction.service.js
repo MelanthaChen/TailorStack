@@ -81,6 +81,13 @@ function extractTextFromContentStreams(buffer, raw, tracer) {
       streamCount: streams.length,
       byteSize: stream.buffer.byteLength
     });
+    if (shouldSkipStream(stream.dictionary)) {
+      tracer.log(`Skipping non-content stream ${index + 1}`, {
+        streamIndex: index + 1,
+        dictionary: stream.dictionary.slice(0, 200)
+      });
+      continue;
+    }
     const content = decodePdfStream(stream, tracer, index + 1);
     const text = tracer.measure("Extracting text operators", () => extractTextOperators(content, tracer, { source: "stream", streamIndex: index + 1 }));
     if (text) chunks.push(text);
@@ -118,6 +125,12 @@ function findPdfStreams(buffer, raw, tracer) {
     searchFrom = endMarker + "endstream".length;
   }
   return streams;
+}
+
+function shouldSkipStream(dictionary) {
+  return /\/Type\s*\/ObjStm\b/.test(dictionary) ||
+    /\/FontFile(?:2|3)?\b/.test(dictionary) ||
+    /\/Subtype\s*\/Image\b/.test(dictionary);
 }
 
 function streamStartOffset(raw, streamKeyword) {
@@ -161,18 +174,16 @@ function decodePdfStream(stream, tracer, streamNumber) {
 
 function extractTextOperators(content, tracer, fields = {}) {
   const values = [];
-  const tokenPattern = /(\((?:\\.|[^\\()])*\)|<[\dA-Fa-f\s]+>|\[(?:\s*(?:\((?:\\.|[^\\()])*\)|<[\dA-Fa-f\s]+>|-?\d+(?:\.\d+)?)\s*)+\])\s*(?:Tj|TJ|')|(\((?:\\.|[^\\()])*\))\s*"/g;
-  let match;
-  while ((match = tokenPattern.exec(content))) {
+  for (let index = 0; index < content.length; index += 1) {
     tracer.assertWithinLimits("Extracting text operators");
-    if (tracer.summary.textOperatorsFound >= maxTextOperators) {
-      throw extractionError(`Malformed PDF: exceeded ${maxTextOperators} text operators`);
-    }
-    tracer.summary.textOperatorsFound += 1;
-    const token = match[1] ?? match[2];
+    const operator = readTextOperator(content, index);
+    if (!operator) continue;
+    const token = readPreviousTextToken(content, index);
+    if (!token) continue;
+    recordTextOperator(tracer);
     const text = decodeTextToken(token, tracer);
     if (text) values.push(text);
-    if (tokenPattern.lastIndex === match.index) tokenPattern.lastIndex += 1;
+    index += operator.length - 1;
   }
   tracer.log("Extracting text operators complete", {
     ...fields,
@@ -182,21 +193,125 @@ function extractTextOperators(content, tracer, fields = {}) {
   return normalizeExtractedText(values.join("\n"));
 }
 
+function readTextOperator(content, index) {
+  if (content.startsWith("TJ", index) && isOperatorBoundary(content, index, 2)) return "TJ";
+  if (content.startsWith("Tj", index) && isOperatorBoundary(content, index, 2)) return "Tj";
+  if (content[index] === "'" && isOperatorBoundary(content, index, 1)) return "'";
+  if (content[index] === "\"" && isOperatorBoundary(content, index, 1)) return "\"";
+  return null;
+}
+
+function isOperatorBoundary(content, index, length) {
+  const before = content[index - 1] ?? " ";
+  const after = content[index + length] ?? " ";
+  return isPdfWhitespace(before) && isPdfDelimiter(after);
+}
+
+function readPreviousTextToken(content, operatorIndex) {
+  let index = skipWhitespaceBackward(content, operatorIndex - 1);
+  if (index < 0) return "";
+  if (content[index] === ")") return readLiteralTokenBackward(content, index);
+  if (content[index] === ">") return readHexTokenBackward(content, index);
+  if (content[index] === "]") return readArrayTokenBackward(content, index);
+  return "";
+}
+
+function readLiteralTokenBackward(content, endIndex) {
+  let escaped = false;
+  let depth = 0;
+  for (let index = endIndex; index >= 0; index -= 1) {
+    const char = content[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === ")") depth += 1;
+    if (char === "(") {
+      depth -= 1;
+      if (depth === 0) return content.slice(index, endIndex + 1);
+    }
+  }
+  return "";
+}
+
+function readHexTokenBackward(content, endIndex) {
+  const startIndex = content.lastIndexOf("<", endIndex);
+  if (startIndex === -1) return "";
+  return content.slice(startIndex, endIndex + 1);
+}
+
+function readArrayTokenBackward(content, endIndex) {
+  let depth = 0;
+  for (let index = endIndex; index >= 0; index -= 1) {
+    const char = content[index];
+    if (char === "]") depth += 1;
+    if (char === "[") {
+      depth -= 1;
+      if (depth === 0) return content.slice(index, endIndex + 1);
+    }
+  }
+  return "";
+}
+
+function recordTextOperator(tracer) {
+  if (tracer.summary.textOperatorsFound >= maxTextOperators) {
+    throw extractionError(`Malformed PDF: exceeded ${maxTextOperators} text operators`);
+  }
+  tracer.summary.textOperatorsFound += 1;
+}
+
 function decodeTextToken(token, tracer) {
   if (token.startsWith("[")) {
-    const pieces = [];
-    const pattern = /\((?:\\.|[^\\()])*\)|<[\dA-Fa-f\s]+>/g;
-    let match;
-    while ((match = pattern.exec(token))) {
-      tracer.assertWithinLimits("Decoding text array");
-      pieces.push(decodeTextToken(match[0], tracer));
-      if (pattern.lastIndex === match.index) pattern.lastIndex += 1;
-    }
-    return pieces.join("");
+    return decodeArrayToken(token, tracer);
   }
   if (token.startsWith("<")) return decodeHexString(token, tracer);
   if (token.startsWith("(")) return unescapePdfString(token.slice(1, -1));
   return "";
+}
+
+function decodeArrayToken(token, tracer) {
+  const pieces = [];
+  for (let index = 1; index < token.length - 1; index += 1) {
+    tracer.assertWithinLimits("Decoding text array");
+    const char = token[index];
+    if (char === "(") {
+      const literal = readLiteralTokenForward(token, index);
+      if (literal.value) pieces.push(decodeTextToken(literal.value, tracer));
+      index = literal.endIndex;
+    } else if (char === "<") {
+      const endIndex = token.indexOf(">", index + 1);
+      if (endIndex === -1) break;
+      pieces.push(decodeTextToken(token.slice(index, endIndex + 1), tracer));
+      index = endIndex;
+    }
+  }
+  return pieces.join("");
+}
+
+function readLiteralTokenForward(content, startIndex) {
+  let escaped = false;
+  let depth = 0;
+  for (let index = startIndex; index < content.length; index += 1) {
+    const char = content[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return { value: content.slice(startIndex, index + 1), endIndex: index };
+    }
+  }
+  return { value: "", endIndex: startIndex };
 }
 
 function decodeHexString(token, tracer) {
@@ -236,6 +351,20 @@ function normalizeExtractedText(value) {
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter((line) => line.length > 1 && /[A-Za-z]/.test(line))
     .join("\n");
+}
+
+function skipWhitespaceBackward(content, index) {
+  let cursor = index;
+  while (cursor >= 0 && isPdfWhitespace(content[cursor])) cursor -= 1;
+  return cursor;
+}
+
+function isPdfWhitespace(char) {
+  return char === " " || char === "\n" || char === "\r" || char === "\t" || char === "\f" || char === "\0";
+}
+
+function isPdfDelimiter(char) {
+  return isPdfWhitespace(char) || "()<>[]{}/%".includes(char);
 }
 
 class ExtractionTracer {

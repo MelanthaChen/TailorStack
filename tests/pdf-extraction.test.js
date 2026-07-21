@@ -75,6 +75,36 @@ test("PdfExtractionService aborts malformed streams with a meaningful error", ()
   assert.throws(() => service.extract(malformed), /has no endstream marker|could not inflate stream/);
 });
 
+test("PdfExtractionService skips compressed object streams without running text extraction on them", () => {
+  const logs = [];
+  const service = new PdfExtractionService();
+  const objectStreamContent = [
+    "18 0 19 33 20 220",
+    "<< /A << /S /URI /URI (mailto:person@example.com) >> /Type /Annot >>",
+    "<< /Limits [ (Doc-Start) (section*.4) ] /Names [ (Doc-Start) 23 0 R (page.) 22 0 R ] >>"
+  ].join("\n");
+  const objectStream = zlib.deflateSync(Buffer.from(objectStreamContent, "latin1"));
+  const pdf = Buffer.from([
+    "%PDF-1.5",
+    `1 0 obj << /Type /ObjStm /Length ${objectStream.length} /Filter /FlateDecode /N 3 /First 20 >> stream`,
+    objectStream.toString("latin1"),
+    "endstream endobj",
+    "%%EOF"
+  ].join("\n"), "latin1");
+
+  const result = service.extract(pdf, {
+    logger: {
+      info(event, fields) {
+        logs.push({ event, fields });
+      }
+    }
+  });
+
+  assert.equal(result.metadata.extractionSummary.objectsProcessed, 1);
+  assert.equal(result.metadata.extractionSummary.streamsInflated, 0);
+  assert.ok(logs.some((entry) => entry.event === "pdf_extraction_trace" && entry.fields.operation === "Skipping non-content stream 1"));
+});
+
 function createCompressedTextPdf(lines) {
   const content = [
     "BT",
