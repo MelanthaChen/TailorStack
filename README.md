@@ -65,23 +65,51 @@ Core schema areas:
 
 ## Local Development
 
-1. Copy `.env.example` to `.env`.
-2. Start infrastructure:
+1. Install dependencies:
    ```sh
-   npm run dev:infra
+   npm install
    ```
-3. Run migrations:
+2. Start the full local stack:
    ```sh
-   npm run migrate
+   npm run dev
    ```
-4. Start the API:
-   ```sh
-   npm run dev:api
-   ```
-5. Start the frontend:
-   ```sh
-   npm run dev:web
-   ```
+
+`npm run dev` starts Docker infrastructure, waits for PostgreSQL, then starts the API and Web app with prefixed logs:
+
+```text
+[infra] PostgreSQL ready
+[api] Listening on :4000
+[web] Web app listening on http://127.0.0.1:3000
+```
+
+Press `Ctrl+C` to stop API and Web. Docker infrastructure is left running for faster restarts.
+
+Stop everything, including Docker infrastructure:
+
+```sh
+npm run stop
+```
+
+Optional individual commands are still available:
+
+```sh
+npm run dev:infra
+npm run migrate
+npm run dev:api
+npm run dev:web
+```
+
+Copy `.env.example` to `.env` only when overriding local defaults:
+
+```sh
+cp .env.example .env
+```
+
+Run migrations manually when schema changes are added:
+
+```sh
+npm run migrate
+```
 
 ## Testing
 

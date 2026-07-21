@@ -34,6 +34,9 @@ test("end-to-end upload PDF then parse structured draft", async () => {
       cookie
     });
     assert.equal(run.body.data.parseJob.status, "succeeded");
+    assert.equal(run.body.data.parseJob.stage, "completed");
+    assert.equal(run.body.data.parseJob.progress, 100);
+    assert.equal(run.body.data.parseJob.message, "Parse completed.");
 
     const preview = await callApi(app, {
       method: "GET",
@@ -49,6 +52,10 @@ test("end-to-end upload PDF then parse structured draft", async () => {
 test("frontend parsed draft preview is read-only", async () => {
   const appJs = await readFile("apps/web/public/app.js", "utf8");
   assert.match(appJs, /Read-only preview/);
+  assert.match(appJs, /parseProgressHtml/);
+  assert.match(appJs, /progress-bar/);
+  assert.match(appJs, /Parsing resume sections/);
+  assert.match(appJs, /pollParseProgress/);
   assert.doesNotMatch(appJs, /confirm parsed/i);
   assert.doesNotMatch(appJs, /contenteditable/i);
 });

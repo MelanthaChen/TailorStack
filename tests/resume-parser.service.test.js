@@ -19,6 +19,7 @@ test("ResumeParserService executes parse job and persists draft", async () => {
   const asyncJobs = new InMemoryAsyncJobRepository();
   const resumeParser = new InMemoryResumeParserRepository();
   const storage = new FileSystemObjectStorage({ rootPath, bucket: "bucket" });
+  const infoLogs = [];
 
   try {
     await storage.putObject("resume.pdf", Buffer.from("%PDF-1.4\n(Experience)\n(- Built APIs)\n"));
@@ -52,7 +53,12 @@ test("ResumeParserService executes parse job and persists draft", async () => {
       objectStorage: storage,
       pdfExtractionService: new PdfExtractionService(),
       aiResumeParserService: new AiResumeParserService(),
-      logger: { info() {}, error() {} }
+      logger: {
+        info(event, fields) {
+          infoLogs.push({ event, fields });
+        },
+        error() {}
+      }
     });
 
     const result = await service.executeParseJob(job.id, { requestId: "req_1" });
@@ -60,9 +66,15 @@ test("ResumeParserService executes parse job and persists draft", async () => {
     const updatedResume = await resumes.findResumeForUser(resume.id, "user_1");
 
     assert.equal(completed.status, "succeeded");
+    assert.equal(completed.stage, "completed");
+    assert.equal(completed.progress, 100);
     assert.equal(updatedResume.status, "review_required");
     assert.equal(result.sections.length, 1);
     assert.equal(result.sections[0].entities[0].bullets[0].text, "Built APIs");
+    assert.deepEqual(
+      infoLogs.filter((entry) => entry.event === "resume_parse_stage_changed").map((entry) => entry.fields.stage),
+      ["reading_pdf", "extracting_text", "parsing_resume", "generating_draft", "saving_draft", "completed"]
+    );
   } finally {
     await rm(rootPath, { recursive: true, force: true });
   }

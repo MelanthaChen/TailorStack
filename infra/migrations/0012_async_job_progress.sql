@@ -1,0 +1,7 @@
+ALTER TABLE async_jobs
+  ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'queued',
+  ADD COLUMN IF NOT EXISTS progress INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS message TEXT NOT NULL DEFAULT 'Queued.';
+
+CREATE INDEX IF NOT EXISTS async_jobs_stage_idx
+  ON async_jobs (stage);

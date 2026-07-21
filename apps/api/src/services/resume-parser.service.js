@@ -37,7 +37,13 @@ export class ResumeParserService {
       throw error;
     }
 
-    await this.asyncJobRepository.updateJobStatus(job.id, { status: "running" });
+    await this.updateParseStage(job, {
+      requestId,
+      status: "running",
+      stage: "reading_pdf",
+      progress: 10,
+      message: "Reading uploaded PDF..."
+    });
     this.logger.info("resume_parse_job_started", { requestId, jobId: job.id, userId: job.userId });
 
     try {
@@ -61,6 +67,12 @@ export class ResumeParserService {
         mimeType: uploadedFile.contentType,
         preview: previewText(fileBuffer.toString("latin1", 0, 200))
       });
+      await this.updateParseStage(job, {
+        requestId,
+        stage: "extracting_text",
+        progress: 30,
+        message: "Extracting text from PDF..."
+      });
       const extraction = this.pdfExtractionService.extract(fileBuffer);
       this.logger.info("resume_parse_trace", {
         requestId,
@@ -68,12 +80,24 @@ export class ResumeParserService {
         stage: "pdf_extraction",
         preview: previewText(extraction.text)
       });
+      await this.updateParseStage(job, {
+        requestId,
+        stage: "parsing_resume",
+        progress: 55,
+        message: "Parsing resume sections..."
+      });
       const normalizedText = normalizeResumeTextForParsing(extraction.text);
       this.logger.info("resume_parse_trace", {
         requestId,
         jobId: job.id,
         stage: "parser_normalization",
         preview: previewText(normalizedText)
+      });
+      await this.updateParseStage(job, {
+        requestId,
+        stage: "generating_draft",
+        progress: 72,
+        message: "Generating structured draft..."
       });
       const parserOutput = validateParserOutput(await this.aiResumeParserService.parse({
         extraction: { ...extraction, text: normalizedText },
@@ -86,12 +110,24 @@ export class ResumeParserService {
         stage: "database_write",
         preview: previewText(databaseWritePreview(parserOutput))
       });
+      await this.updateParseStage(job, {
+        requestId,
+        stage: "saving_draft",
+        progress: 88,
+        message: "Saving parsed draft..."
+      });
       const parsedSections = await this.resumeParserRepository.replaceParsedDraft({
         userId: job.userId,
         resumeId,
         sections: parserOutput.sections
       });
       await this.resumeRepository.updateResumeStatus(resumeId, job.userId, "review_required");
+      await this.updateParseStage(job, {
+        requestId,
+        stage: "completed",
+        progress: 100,
+        message: "Parse completed."
+      });
       const completed = await this.asyncJobRepository.completeJob(job.id, {
         resultRef: {
           resumeId,
@@ -152,6 +188,22 @@ export class ResumeParserService {
     const parseJob = await this.asyncJobRepository.findJobForResume(resumeId, user.id);
     const sections = await this.resumeParserRepository.getParsedDraft(user.id, resumeId);
     return { resume, parseJob, sections };
+  }
+
+  async updateParseStage(job, { requestId, status, stage, progress, message }) {
+    const updated = this.asyncJobRepository.updateJobProgress
+      ? await this.asyncJobRepository.updateJobProgress(job.id, { status, stage, progress, message })
+      : await this.asyncJobRepository.updateJobStatus(job.id, { status: status ?? "running" });
+    this.logger.info("resume_parse_stage_changed", {
+      requestId,
+      jobId: job.id,
+      userId: job.userId,
+      stage,
+      progress,
+      message,
+      status: updated?.status ?? status
+    });
+    return updated;
   }
 }
 

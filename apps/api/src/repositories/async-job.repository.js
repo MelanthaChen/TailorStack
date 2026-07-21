@@ -12,6 +12,9 @@ export class InMemoryAsyncJobRepository {
       userId: input.userId ?? null,
       jobType: input.jobType,
       status: input.status ?? "queued",
+      stage: input.stage ?? "queued",
+      progress: input.progress ?? 0,
+      message: input.message ?? "Queued.",
       idempotencyKey: input.idempotencyKey ?? null,
       priority: input.priority ?? 100,
       payloadRef: input.payloadRef ?? {},
@@ -35,14 +38,22 @@ export class InMemoryAsyncJobRepository {
   }
 
   async updateJobStatus(id, { status }) {
+    return this.updateJobProgress(id, stageDefaultsForStatus(status));
+  }
+
+  async updateJobProgress(id, { status, stage, progress, message }) {
     const job = await this.findJobById(id);
     if (!job) return null;
     const now = new Date().toISOString();
+    const nextStatus = status ?? job.status;
     const updated = {
       ...job,
-      status,
-      startedAt: status === "running" ? now : job.startedAt,
-      completedAt: ["succeeded", "failed", "canceled"].includes(status) ? now : job.completedAt,
+      status: nextStatus,
+      stage: stage ?? job.stage,
+      progress: progress ?? job.progress,
+      message: message ?? job.message,
+      startedAt: nextStatus === "running" && !job.startedAt ? now : job.startedAt,
+      completedAt: ["succeeded", "failed", "canceled"].includes(nextStatus) ? now : job.completedAt,
       updatedAt: now
     };
     this.jobs.set(id, updated);
@@ -56,6 +67,9 @@ export class InMemoryAsyncJobRepository {
     const updated = {
       ...job,
       status: "succeeded",
+      stage: "completed",
+      progress: 100,
+      message: "Parse completed.",
       resultRef: resultRef ?? {},
       completedAt: now,
       updatedAt: now
@@ -71,6 +85,9 @@ export class InMemoryAsyncJobRepository {
     const updated = {
       ...job,
       status: "failed",
+      stage: job.stage ?? "failed",
+      progress: job.progress ?? 0,
+      message: errorMessage ?? "Job failed.",
       errorCode,
       errorMessage,
       attemptCount: job.attemptCount + 1,
@@ -87,6 +104,9 @@ export class InMemoryAsyncJobRepository {
     const updated = {
       ...job,
       status: "queued",
+      stage: "queued",
+      progress: 0,
+      message: "Queued.",
       errorCode: null,
       errorMessage: null,
       completedAt: null,
@@ -115,13 +135,15 @@ export class PostgresAsyncJobRepository {
     const id = crypto.randomUUID();
     const rows = await queryJson(this.databaseUrl, `
       INSERT INTO async_jobs (
-        id, user_id, job_type, status, idempotency_key, priority, payload_ref,
+        id, user_id, job_type, status, stage, progress, message, idempotency_key, priority, payload_ref,
         result_ref, error_code, error_message, attempt_count, max_attempts,
         available_at, created_at, updated_at
       )
       VALUES (
         ${sql(id)}, ${sql(input.userId ?? null)}, ${sql(input.jobType)},
-        ${sql(input.status ?? "queued")}, ${sql(input.idempotencyKey ?? null)},
+        ${sql(input.status ?? "queued")}, ${sql(input.stage ?? "queued")},
+        ${input.progress ?? 0}, ${sql(input.message ?? "Queued.")},
+        ${sql(input.idempotencyKey ?? null)},
         ${input.priority ?? 100}, ${sql(input.payloadRef ?? {})}::jsonb,
         NULL, NULL, NULL, 0, ${input.maxAttempts ?? 3},
         ${sql(input.availableAt ?? now)}, ${sql(now)}, ${sql(now)}
@@ -142,12 +164,19 @@ export class PostgresAsyncJobRepository {
   }
 
   async updateJobStatus(id, { status }) {
+    return this.updateJobProgress(id, stageDefaultsForStatus(status));
+  }
+
+  async updateJobProgress(id, { status, stage, progress, message }) {
     const now = new Date().toISOString();
     const rows = await queryJson(this.databaseUrl, `
       UPDATE async_jobs
-      SET status = ${sql(status)},
-          started_at = CASE WHEN ${sql(status)} = 'running' THEN ${sql(now)}::timestamptz ELSE started_at END,
-          completed_at = CASE WHEN ${sql(status)} IN ('succeeded', 'failed', 'canceled') THEN ${sql(now)}::timestamptz ELSE completed_at END,
+      SET status = COALESCE(${sql(status ?? null)}, status),
+          stage = COALESCE(${sql(stage ?? null)}, stage),
+          progress = COALESCE(${progress ?? "NULL"}, progress),
+          message = COALESCE(${sql(message ?? null)}, message),
+          started_at = CASE WHEN COALESCE(${sql(status ?? null)}, status) = 'running' AND started_at IS NULL THEN ${sql(now)}::timestamptz ELSE started_at END,
+          completed_at = CASE WHEN COALESCE(${sql(status ?? null)}, status) IN ('succeeded', 'failed', 'canceled') THEN ${sql(now)}::timestamptz ELSE completed_at END,
           updated_at = ${sql(now)}
       WHERE id = ${sql(id)}
       RETURNING ${jobJson()}
@@ -160,6 +189,9 @@ export class PostgresAsyncJobRepository {
     const rows = await queryJson(this.databaseUrl, `
       UPDATE async_jobs
       SET status = 'succeeded',
+          stage = 'completed',
+          progress = 100,
+          message = 'Parse completed.',
           result_ref = ${sql(resultRef ?? {})}::jsonb,
           completed_at = ${sql(now)},
           updated_at = ${sql(now)}
@@ -174,6 +206,7 @@ export class PostgresAsyncJobRepository {
     const rows = await queryJson(this.databaseUrl, `
       UPDATE async_jobs
       SET status = 'failed',
+          message = ${sql(errorMessage ?? "Job failed.")},
           error_code = ${sql(errorCode)},
           error_message = ${sql(errorMessage)},
           attempt_count = attempt_count + 1,
@@ -189,7 +222,7 @@ export class PostgresAsyncJobRepository {
     const now = new Date().toISOString();
     const rows = await queryJson(this.databaseUrl, `
       UPDATE async_jobs
-      SET status = 'queued', error_code = NULL, error_message = NULL, completed_at = NULL, updated_at = ${sql(now)}
+      SET status = 'queued', stage = 'queued', progress = 0, message = 'Queued.', error_code = NULL, error_message = NULL, completed_at = NULL, updated_at = ${sql(now)}
       WHERE id = ${sql(id)}
       RETURNING ${jobJson()}
     `);
@@ -223,6 +256,9 @@ function jobJson() {
     'userId', user_id,
     'jobType', job_type,
     'status', status,
+    'stage', stage,
+    'progress', progress,
+    'message', message,
     'idempotencyKey', idempotency_key,
     'priority', priority,
     'payloadRef', payload_ref,
@@ -237,4 +273,13 @@ function jobJson() {
     'createdAt', created_at,
     'updatedAt', updated_at
   ) AS value`;
+}
+
+function stageDefaultsForStatus(status) {
+  if (status === "queued") return { status, stage: "queued", progress: 0, message: "Queued." };
+  if (status === "running") return { status, stage: "reading_pdf", progress: 10, message: "Reading uploaded PDF..." };
+  if (status === "succeeded") return { status, stage: "completed", progress: 100, message: "Parse completed." };
+  if (status === "failed") return { status, message: "Parse failed." };
+  if (status === "canceled") return { status, stage: "canceled", message: "Parse canceled." };
+  return { status };
 }

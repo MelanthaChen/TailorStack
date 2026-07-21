@@ -98,7 +98,10 @@ const requiredPaths = [
   "infra/migrations/0009_resume_optimization.sql",
   "infra/migrations/0010_resume_versioning.sql",
   "infra/migrations/0011_application_workspace.sql",
+  "infra/migrations/0012_async_job_progress.sql",
   "infra/migrations",
+  "scripts/dev/dev.mjs",
+  "scripts/dev/stop.mjs",
   ".github/workflows/ci.yml"
 ];
 
@@ -110,6 +113,10 @@ const rootPackage = JSON.parse(await readFile("package.json", "utf8"));
 const workspaceRoots = rootPackage.workspaces ?? [];
 if (!workspaceRoots.includes("apps/*") || !workspaceRoots.includes("packages/*") || !workspaceRoots.includes("workers/*")) {
   throw new Error("Root package.json must define apps, packages, and workers workspaces");
+}
+
+if (rootPackage.scripts?.dev !== "node scripts/dev/dev.mjs" || rootPackage.scripts?.stop !== "node scripts/dev/stop.mjs") {
+  throw new Error("Root package.json must define dev and stop scripts");
 }
 
 for (const dir of ["apps", "packages", "workers"]) {

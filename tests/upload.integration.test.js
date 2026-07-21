@@ -40,6 +40,8 @@ test("authenticated user can upload PDF and create records", async () => {
     assert.equal(upload.body.data.uploadedFile.contentType, "application/pdf");
     assert.equal(upload.body.data.parseJob.jobType, "resume_parse");
     assert.equal(upload.body.data.parseJob.status, "queued");
+    assert.equal(upload.body.data.parseJob.stage, "queued");
+    assert.equal(upload.body.data.parseJob.progress, 0);
 
     const files = [...repositories.uploadedFiles.files.values()];
     const resumes = [...repositories.resumes.resumes.values()];

@@ -4,7 +4,8 @@ const app = document.querySelector("#app");
 const state = {
   user: null,
   loading: true,
-  error: ""
+  error: "",
+  parsePollTimer: null
 };
 
 window.addEventListener("popstate", () => render());
@@ -862,32 +863,23 @@ async function loadParsedDraft(resumeId) {
       await apiFetch(`/v1/parse-jobs/${response.data.parseJob.id}/retry`, { method: "POST" });
       await loadParsedDraft(resumeId);
     });
+    document.querySelector("#parse-progress-retry")?.addEventListener("click", async () => {
+      await apiFetch(`/v1/parse-jobs/${response.data.parseJob.id}/retry`, { method: "POST" });
+      await runParser(response.data.parseJob.id, resumeId, preview);
+    });
+    if (response.data.parseJob?.status === "running") {
+      await pollParseProgress(resumeId, preview);
+    }
   } catch (error) {
     preview.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
   }
 }
 
 async function runParser(jobId, resumeId, container) {
-  container.innerHTML = `<p>Parser running.</p>`;
-  try {
-    await apiFetch(`/v1/parse-jobs/${jobId}/run`, { method: "POST" });
-    if (window.location.pathname.endsWith("/parsed-draft")) {
-      await loadParsedDraft(resumeId);
-    } else {
-      container.innerHTML = `
-        <div class="success">
-          <strong>Parser succeeded.</strong>
-          <p>The structured draft is ready.</p>
-        </div>
-        <div class="actions">
-          <a class="link-button" href="/resumes/${resumeId}/review" data-link>Review draft</a>
-        </div>
-      `;
-      bindLinks();
-    }
-  } catch (error) {
-    container.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
-  }
+  clearParsePolling();
+  container.innerHTML = `<p>Loading parser status.</p>`;
+  apiFetch(`/v1/parse-jobs/${jobId}/run`, { method: "POST" }).catch(() => {});
+  await pollParseProgress(resumeId, container);
 }
 
 async function renderDraftReview(resumeId) {
@@ -998,6 +990,7 @@ async function apiFetch(path, options = {}) {
 }
 
 function navigate(path, replace = false) {
+  clearParsePolling();
   if (replace) {
     window.history.replaceState({}, "", path);
   } else {
@@ -1342,6 +1335,105 @@ function draftReviewHtml(data) {
   `;
 }
 
+const parseStages = [
+  { stage: "queued", label: "PDF uploaded" },
+  { stage: "reading_pdf", label: "Reading PDF" },
+  { stage: "extracting_text", label: "Text extracted" },
+  { stage: "parsing_resume", label: "Parsing resume sections" },
+  { stage: "generating_draft", label: "Generating draft" },
+  { stage: "saving_draft", label: "Saving draft" },
+  { stage: "completed", label: "Draft ready" }
+];
+
+async function pollParseProgress(resumeId, container) {
+  const tick = async () => {
+    try {
+      const response = await apiFetch(`/v1/resumes/${resumeId}/parsed-draft`);
+      const job = response.data.parseJob;
+      container.innerHTML = parseProgressHtml(job);
+
+      if (job?.status === "succeeded") {
+        clearParsePolling();
+        navigate(`/resumes/${resumeId}/review`, true);
+        return;
+      }
+
+      if (job?.status === "failed") {
+        clearParsePolling();
+        document.querySelector("#parse-progress-retry")?.addEventListener("click", async () => {
+          await apiFetch(`/v1/parse-jobs/${job.id}/retry`, { method: "POST" });
+          await runParser(job.id, resumeId, container);
+        });
+        return;
+      }
+
+      state.parsePollTimer = window.setTimeout(tick, 900);
+    } catch (error) {
+      clearParsePolling();
+      container.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
+    }
+  };
+
+  await tick();
+}
+
+function clearParsePolling() {
+  if (state.parsePollTimer) {
+    window.clearTimeout(state.parsePollTimer);
+    state.parsePollTimer = null;
+  }
+}
+
+function parseProgressHtml(job) {
+  const stage = job?.stage ?? "queued";
+  const progress = clampProgress(job?.progress ?? 0);
+  const message = job?.message ?? stageLabel(stage);
+  const isFailed = job?.status === "failed";
+  return `
+    <div class="parse-progress ${isFailed ? "failed" : ""}">
+      <div class="progress-header">
+        <strong>${escapeHtml(stageLabel(stage))}</strong>
+        <span>${progress}%</span>
+      </div>
+      <div class="progress-track" aria-label="Parser progress">
+        <div class="progress-bar" style="width: ${progress}%"></div>
+      </div>
+      <p>${escapeHtml(message)}</p>
+      <ol class="stage-list">
+        ${parseStages.map((item) => parseStageItemHtml(item, stage, isFailed)).join("")}
+      </ol>
+      ${isFailed ? `
+        <div class="error">
+          <strong>Parser failed at ${escapeHtml(stageLabel(stage))}.</strong>
+          <p>${escapeHtml(job.errorMessage ?? "The parser could not complete.")}</p>
+        </div>
+        <div class="actions"><button id="parse-progress-retry" type="button">Retry</button></div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function parseStageItemHtml(item, currentStage, failed) {
+  const currentIndex = parseStages.findIndex((stage) => stage.stage === currentStage);
+  const itemIndex = parseStages.findIndex((stage) => stage.stage === item.stage);
+  const marker = failed && item.stage === currentStage
+    ? "!"
+    : itemIndex < currentIndex
+      ? "✓"
+      : itemIndex === currentIndex
+        ? "▶"
+        : "○";
+  return `<li class="${itemIndex === currentIndex ? "current" : ""}"><span>${marker}</span>${escapeHtml(item.label)}</li>`;
+}
+
+function stageLabel(stage) {
+  return parseStages.find((item) => item.stage === stage)?.label ?? stage.split("_").join(" ");
+}
+
+function clampProgress(value) {
+  return Math.max(0, Math.min(100, Number(value) || 0));
+}
+
 function parsedDraftHtml(data) {
   const job = data.parseJob;
   const actions = job?.status === "queued"
@@ -1356,7 +1448,8 @@ function parsedDraftHtml(data) {
     <div class="status-row">
       <p>Resume status: ${escapeHtml(data.resume.status)}</p>
       <p>Parse job: ${escapeHtml(job?.status ?? "not queued")}</p>
-      ${job?.errorMessage ? `<div class="error">${escapeHtml(job.errorMessage)}</div>` : ""}
+      ${job && ["running", "failed"].includes(job.status) ? parseProgressHtml(job) : ""}
+      ${job?.errorMessage && job.status !== "failed" ? `<div class="error">${escapeHtml(job.errorMessage)}</div>` : ""}
       <div class="actions">${actions}<a class="link-button secondary" href="/resumes" data-link>Back</a></div>
     </div>
     <div class="parsed-preview">${sections}</div>

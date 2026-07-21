@@ -8,6 +8,9 @@ export class InMemoryQueue {
       userId: job.userId ?? null,
       jobType: job.jobType ?? job.type,
       status: "queued",
+      stage: job.stage ?? "queued",
+      progress: job.progress ?? 0,
+      message: job.message ?? "Queued.",
       priority: job.priority ?? 100,
       payloadRef: job.payloadRef ?? job.payload ?? {},
       resultRef: null,
@@ -49,7 +52,26 @@ export class InMemoryQueue {
     const job = await this.getJob(id);
     if (!job) return null;
     const now = new Date().toISOString();
-    const updated = { ...job, status: "running", startedAt: now, updatedAt: now };
+    const updated = { ...job, status: "running", stage: "reading_pdf", progress: 10, message: "Reading uploaded PDF...", startedAt: now, updatedAt: now };
+    this.#jobs.set(id, updated);
+    return updated;
+  }
+
+  async updateJobProgress(id, { status, stage, progress, message }) {
+    const job = await this.getJob(id);
+    if (!job) return null;
+    const nextStatus = status ?? job.status;
+    const now = new Date().toISOString();
+    const updated = {
+      ...job,
+      status: nextStatus,
+      stage: stage ?? job.stage,
+      progress: progress ?? job.progress,
+      message: message ?? job.message,
+      startedAt: nextStatus === "running" && !job.startedAt ? now : job.startedAt,
+      completedAt: ["succeeded", "failed", "canceled"].includes(nextStatus) ? now : job.completedAt,
+      updatedAt: now
+    };
     this.#jobs.set(id, updated);
     return updated;
   }
@@ -58,7 +80,7 @@ export class InMemoryQueue {
     const job = await this.getJob(id);
     if (!job) return null;
     const now = new Date().toISOString();
-    const updated = { ...job, status: "succeeded", resultRef: resultRef ?? {}, completedAt: now, updatedAt: now };
+    const updated = { ...job, status: "succeeded", stage: "completed", progress: 100, message: "Parse completed.", resultRef: resultRef ?? {}, completedAt: now, updatedAt: now };
     this.#jobs.set(id, updated);
     return updated;
   }
@@ -70,6 +92,7 @@ export class InMemoryQueue {
     const updated = {
       ...job,
       status: "failed",
+      message: errorMessage ?? "Job failed.",
       errorCode,
       errorMessage,
       attemptCount: job.attemptCount + 1,
@@ -86,6 +109,9 @@ export class InMemoryQueue {
     const updated = {
       ...job,
       status: "queued",
+      stage: "queued",
+      progress: 0,
+      message: "Queued.",
       errorCode: null,
       errorMessage: null,
       availableAt: new Date().toISOString(),
@@ -176,6 +202,10 @@ export class RepositoryBackedQueue {
 
   async markRunning(id) {
     return this.jobRepository.updateJobStatus(id, { status: "running" });
+  }
+
+  async updateJobProgress(id, fields) {
+    return this.jobRepository.updateJobProgress(id, fields);
   }
 
   async completeJob(id, { resultRef } = {}) {

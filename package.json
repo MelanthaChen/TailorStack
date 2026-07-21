@@ -12,6 +12,8 @@
   "scripts": {
     "check": "node scripts/ci/check-workspace.mjs",
     "test": "node --test",
+    "dev": "node scripts/dev/dev.mjs",
+    "stop": "node scripts/dev/stop.mjs",
     "dev:api": "node apps/api/src/server.js",
     "dev:web": "node apps/web/src/dev-server.js",
     "dev:infra": "docker compose -f infra/docker/docker-compose.yml up",

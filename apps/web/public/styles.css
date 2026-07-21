@@ -131,6 +131,67 @@ button:disabled {
   padding: 10px 12px;
 }
 
+.parse-progress {
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  background: #ffffff;
+}
+
+.parse-progress.failed {
+  border-color: #e0a4a4;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #17202a;
+}
+
+.progress-track {
+  width: 100%;
+  height: 12px;
+  border-radius: 999px;
+  background: #e7ebf1;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: #2860a8;
+  transition: width 180ms ease;
+}
+
+.stage-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage-list li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: #69788c;
+}
+
+.stage-list li.current {
+  color: #17202a;
+  font-weight: 700;
+}
+
+.stage-list span {
+  width: 20px;
+  color: #2860a8;
+  font-weight: 800;
+}
+
 .topbar {
   position: fixed;
   inset: 0 0 auto;

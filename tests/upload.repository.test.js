@@ -43,5 +43,30 @@ test("async job repository creates parse jobs", async () => {
   });
 
   assert.equal(job.status, "queued");
+  assert.equal(job.stage, "queued");
+  assert.equal(job.progress, 0);
+  assert.equal(job.message, "Queued.");
   assert.equal((await repository.findJobForResume("resume_1", "user_1")).id, job.id);
+});
+
+test("async job repository tracks parser progress stages", async () => {
+  const repository = new InMemoryAsyncJobRepository();
+  const job = await repository.createJob({
+    userId: "user_1",
+    jobType: "resume_parse",
+    payloadRef: { resumeId: "resume_1" }
+  });
+
+  const updated = await repository.updateJobProgress(job.id, {
+    status: "running",
+    stage: "extracting_text",
+    progress: 35,
+    message: "Extracting text from PDF..."
+  });
+
+  assert.equal(updated.status, "running");
+  assert.equal(updated.stage, "extracting_text");
+  assert.equal(updated.progress, 35);
+  assert.equal(updated.message, "Extracting text from PDF...");
+  assert.ok(updated.updatedAt);
 });
