@@ -31,6 +31,50 @@ test("PdfExtractionService extracts readable text from compressed PDF content st
   assert.equal(result.pages[0].blocks[0].lines.length, 5);
 });
 
+test("PdfExtractionService emits timed extraction trace and summary logs", () => {
+  const logs = [];
+  const service = new PdfExtractionService();
+  const pdf = createCompressedTextPdf(["Experience", "Built APIs"]);
+
+  const result = service.extract(pdf, {
+    requestId: "req_pdf",
+    jobId: "job_pdf",
+    logger: {
+      info(event, fields) {
+        logs.push({ event, fields });
+      }
+    }
+  });
+
+  assert.match(result.text, /Experience/);
+  assert.ok(logs.some((entry) => entry.event === "pdf_extraction_step_started" && entry.fields.operation === "Finding objects"));
+  assert.ok(logs.some((entry) => entry.event === "pdf_extraction_trace" && /Processing object 1\/1/.test(entry.fields.operation)));
+  assert.ok(logs.some((entry) => entry.event === "pdf_extraction_trace" && /Inflating stream 1/.test(entry.fields.operation)));
+
+  const finished = logs.find((entry) => entry.event === "pdf_extraction_step_finished" && entry.fields.operation === "Extracting text operators");
+  assert.equal(typeof finished.fields.startTime, "string");
+  assert.equal(typeof finished.fields.endTime, "string");
+  assert.equal(typeof finished.fields.elapsedMs, "number");
+
+  const summary = logs.find((entry) => entry.event === "pdf_extraction_summary");
+  assert.equal(summary.fields.objectsProcessed, 1);
+  assert.equal(summary.fields.streamsInflated, 1);
+  assert.equal(summary.fields.textOperatorsFound, 2);
+  assert.equal(summary.fields.charactersExtracted > 0, true);
+  assert.equal(typeof summary.fields.elapsedMs, "number");
+});
+
+test("PdfExtractionService aborts malformed streams with a meaningful error", () => {
+  const service = new PdfExtractionService();
+  const malformed = Buffer.from([
+    "%PDF-1.4",
+    "1 0 obj << /Length 10 /Filter /FlateDecode >> stream",
+    "not-valid-deflate"
+  ].join("\n"), "latin1");
+
+  assert.throws(() => service.extract(malformed), /has no endstream marker|could not inflate stream/);
+});
+
 function createCompressedTextPdf(lines) {
   const content = [
     "BT",

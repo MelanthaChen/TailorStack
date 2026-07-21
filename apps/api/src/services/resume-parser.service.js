@@ -73,7 +73,11 @@ export class ResumeParserService {
         progress: 30,
         message: "Extracting text from PDF..."
       });
-      const extraction = this.pdfExtractionService.extract(fileBuffer);
+      const extraction = this.pdfExtractionService.extract(fileBuffer, {
+        logger: this.logger,
+        requestId,
+        jobId: job.id
+      });
       this.logger.info("resume_parse_trace", {
         requestId,
         jobId: job.id,
